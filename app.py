@@ -39,6 +39,13 @@ except ImportError:
 from monitoring import monitor
 from metrics_server import start_metrics_server
 
+# Set page config - must be the first Streamlit command
+st.set_page_config(
+    page_title="Stock Price Prediction",
+    page_icon="📈",
+    layout="wide"
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -88,13 +95,6 @@ def start_monitoring():
 # Start the metrics server in a daemon thread
 monitoring_thread = threading.Thread(target=start_monitoring, daemon=True)
 monitoring_thread.start()
-
-# Set page config
-st.set_page_config(
-    page_title="Stock Price Prediction",
-    page_icon="📈",
-    layout="wide"
-)
 
 # Custom CSS for better styling
 st.markdown("""
