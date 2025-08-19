@@ -13,7 +13,6 @@ mkdir -p .streamlit
 cat > .streamlit/config.toml <<EOL
 [server]
 headless = true
-port = 8501
 enableCORS = true
 enableXsrfProtection = false
 
