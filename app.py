@@ -42,26 +42,43 @@ from metrics_server import start_metrics_server
 # Load environment variables
 load_dotenv()
 
-# Initialize Polygon client with session state
+# Initialize session state variables
 if 'polygon_client' not in st.session_state:
     st.session_state.polygon_client = None
+    st.session_state.use_sample_data = True  # Default to using sample data
 
 # Function to initialize Polygon client
-def init_polygon_client(api_key: str):
+def init_polygon_client():
     try:
-        return RESTClient(api_key=api_key)
+        if 'POLYGON_API_KEY' not in os.environ:
+            return None
+        return RESTClient(api_key=os.environ['POLYGON_API_KEY'])
     except Exception as e:
         st.error(f"Error initializing Polygon client: {str(e)}")
         return None
 
-# Sidebar for data source selection
+# Sidebar for stock selection
 with st.sidebar:
-    st.subheader("Data Source")
-    st.info("Using sample data for demonstration.")
+    st.subheader("Stock Selection")
     
-    # Hidden API key input for future use
-    if 'polygon_client' in st.session_state:
-        del st.session_state.polygon_client
+    # Initialize Polygon client if needed
+    if 'POLYGON_API_KEY' not in os.environ:
+        st.error("POLYGON_API_KEY not found in environment variables. Please set it in the .env file.")
+        st.stop()
+    
+    if st.session_state.polygon_client is None:
+        st.session_state.polygon_client = init_polygon_client()
+    
+    # Show ticker input
+    ticker = st.text_input(
+        'Stock Ticker', 
+        'AAPL', 
+        help='Enter the stock ticker symbol (e.g., AAPL, MSFT)',
+        key='ticker_input'
+    ).upper()
+    
+    # Always use real-time data
+    use_sample_data = False
 
 # Start metrics server in a separate thread
 def start_monitoring():
@@ -119,16 +136,14 @@ look_back = st.sidebar.slider(
     step=1,
     help='Number of previous days to use for prediction (lower values work better with sample data)')
 
-# Years of data to use (only show if not using sample data)
-years_of_data = 5  # Default value
-if not use_sample_data:
-    years_of_data = st.sidebar.slider(
-        'Years of Historical Data', 
-        min_value=1, 
-        max_value=5,  # Reduced from 10 to 5 for stability
-        value=3,  # Default to 3 years
-        step=1,
-        help='Number of years of historical data to use for training')
+# Years of data to use
+years_of_data = st.sidebar.slider(
+    'Years of Historical Data', 
+    min_value=1, 
+    max_value=5,  # Maximum 5 years
+    value=1,  # Default to 1 year
+    step=1,
+    help='Number of years of historical data to use for training')
 
 # Model training settings
 st.sidebar.subheader('Model Settings')
@@ -268,45 +283,77 @@ def fetch_stock_data(ticker: str, years: int = 5) -> Optional[pd.DataFrame]:
         st.error(f"Error fetching data from Polygon.io: {str(e)}")
         return None
 
-def load_sample_stock_data() -> Tuple[pd.DataFrame, bool]:
-    """Load sample stock data from Excel file"""
+def load_sample_stock_data(ticker: str = 'AAPL') -> pd.DataFrame:
+    """
+    Load sample stock data from Excel file based on ticker
+    
+    Args:
+        ticker: Stock ticker symbol (currently only 'AAPL' is supported for sample data)
+        
+    Returns:
+        DataFrame with stock data
+    """
     try:
-        # Try to load from the Excel file
-        excel_file = "sample_aapl_data.xlsx"
-        if os.path.exists(excel_file):
-            df = pd.read_excel(excel_file, index_col=0)
+        # Currently we only have AAPL sample data
+        if ticker.upper() != 'AAPL':
+            st.warning(f"Sample data is only available for AAPL. Using AAPL data instead of {ticker}.")
             
+        excel_file = "sample_aapl_data.xlsx"
+        
+        # Check if file exists
+        if not os.path.exists(excel_file):
+            raise FileNotFoundError(f"Sample data file not found: {excel_file}")
+            
+        # Try to read the Excel file
+        try:
+            # First read without setting index to check for required columns
+            df = pd.read_excel(excel_file, engine='openpyxl')
+            
+            # Check if DataFrame is empty
+            if df.empty:
+                raise ValueError("Sample data file is empty")
+                
             # Ensure we have all required columns
-            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            if all(col in df.columns for col in required_columns):
-                # Ensure index is datetime and sorted
-                if not isinstance(df.index, pd.DatetimeIndex):
-                    df.index = pd.to_datetime(df.index)
-                df = df.sort_index()
-                st.info(f"Successfully loaded sample data from {excel_file}")
-                return df, False
+            required_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+            missing_cols = [col for col in required_columns if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns in sample data file: {', '.join(missing_cols)}")
+                
+            # Set Date as index and sort
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date')
+            df = df.sort_index()
+            
+            # Keep only the required columns in the right order
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+            
+            st.info(f"Successfully loaded data from {excel_file}")
+            return df
+            
+        except ImportError:
+            st.error("openpyxl is required to read Excel files. Install it with: pip install openpyxl")
+            raise
         
-        # Fallback to generating sample data if file not found or invalid
-        st.warning("Sample data file not found or invalid. Generating sample data...")
+    except Exception as e:
+        st.error(f"Error loading sample data: {str(e)}")
+        # If we get here, something went wrong with the Excel file
+        # Fall back to generating sample data
+        st.warning("Falling back to generated sample data")
         
-        # Generate sample data as fallback
-        np.random.seed(42)
+        # Generate sample data
         n_points = 1000
         dates = pd.date_range(end=datetime.now(), periods=n_points, freq='B')
         base = np.linspace(100, 200, n_points)
         noise = np.random.normal(0, 5, n_points)
         
-        # Create realistic stock-like data
         close_prices = base + noise
         open_prices = close_prices * (1 + np.random.normal(0, 0.005, n_points))
         high_prices = close_prices * (1 + np.random.uniform(0, 0.01, n_points))
         low_prices = close_prices * (1 - np.random.uniform(0, 0.01, n_points))
         
-        # Ensure high > open,close > low
         high_prices = np.maximum(high_prices, open_prices, close_prices)
         low_prices = np.minimum(low_prices, open_prices, close_prices)
         
-        # Create DataFrame
         df = pd.DataFrame({
             'Open': open_prices,
             'High': high_prices,
@@ -315,27 +362,97 @@ def load_sample_stock_data() -> Tuple[pd.DataFrame, bool]:
             'Volume': np.random.randint(100000, 1000000, size=n_points)
         }, index=dates)
         
-        # Ensure index is datetime and sorted
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
-        
-        return df, False
-        
-    except Exception as e:
-        st.error(f"Error loading sample data: {str(e)}")
-        # Return empty DataFrame with proper columns if something goes wrong
-        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), False
+        df.index = pd.to_datetime(df.index)
+        return df.sort_index()
 
-def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 5, use_sample_data: bool = False) -> Tuple[pd.DataFrame, bool]:
+def fetch_realtime_data(ticker: str, years: int = 5) -> Optional[pd.DataFrame]:
+    """
+    Fetch stock data, using sample data for AAPL and Polygon API for other tickers
+    
+    Args:
+        ticker: Stock ticker symbol
+        years: Number of years of historical data to fetch (not used for sample data)
+        
+    Returns:
+        DataFrame with stock data or None if there was an error
+    """
+    try:
+        # For AAPL, use the sample data from Excel
+        if ticker.upper() == 'AAPL':
+            st.info("Using sample data for AAPL...")
+            return load_sample_stock_data('AAPL')
+            
+        # For other tickers, use Polygon API
+        if st.session_state.get('polygon_client') is None:
+            raise ValueError("Polygon API client not initialized. Please check your API key and try again.")
+            
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=years*365)
+        
+        st.info(f"Fetching {years} years of data for {ticker} from Polygon...")
+        
+        # Convert dates to strings in YYYY-MM-DD format
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        
+        try:
+            # Get the client from session state
+            client = st.session_state.polygon_client
+            
+            # First, check if the ticker is valid by getting aggregates
+            aggs = []
+            for a in client.list_aggs(
+                ticker=ticker,
+                multiplier=1,
+                timespan='day',
+                from_=start_str,
+                to=end_str,
+                limit=50000  # Max limit
+            ):
+                aggs.append(a)
+            
+            if not aggs:
+                raise ValueError(f"No data returned for ticker: {ticker}. Please check the ticker symbol.")
+            
+            # Convert to DataFrame
+            df = pd.DataFrame([{
+                'Date': pd.to_datetime(agg.timestamp, unit='ms'),
+                'Open': agg.open,
+                'High': agg.high,
+                'Low': agg.low,
+                'Close': agg.close,
+                'Volume': agg.volume
+            } for agg in aggs])
+            
+            if df.empty:
+                raise ValueError(f"No valid data points found for {ticker}")
+                
+            # Set index and sort
+            df = df.set_index('Date').sort_index()
+            
+            # Record successful fetch
+            monitor.record_api_call('polygon', 'success')
+            monitor.record_data_metrics(len(df))
+            
+            return df
+            
+        except Exception as e:
+            raise ValueError(f"Error fetching data from Polygon: {str(e)}")
+            
+    except Exception as e:
+        monitor.record_api_call('polygon', 'error')
+        st.error(f"Error: {str(e)}")
+        return None
+
+def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 1, use_sample_data: bool = False) -> Tuple[pd.DataFrame, bool]:
     """
     Load and prepare data for training with enhanced validation
     
     Args:
         ticker: Stock ticker symbol
         look_back: Number of lookback periods needed for the model
-        years_of_data: Number of years of historical data to fetch
-        use_sample_data: Whether to use sample data instead of real-time data
+        years_of_data: Number of years of historical data to fetch (only used for non-AAPL tickers)
+        use_sample_data: Kept for backward compatibility, not used
         
     Returns:
         Tuple of (data, is_real_data) where data is a DataFrame and is_real_data is a boolean
@@ -360,30 +477,26 @@ def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 5, u
         return df[df.index.dayofweek < 5]  # 0=Monday, 4=Friday
 
     try:
-        # Use sample data if requested or if no API client is available
-        if use_sample_data or st.session_state.polygon_client is None:
-            st.info("Using sample data.")
-            data, _ = load_sample_stock_data()
+        # For AAPL, always use sample data
+        if ticker.upper() == 'AAPL':
+            st.info("Using sample data for AAPL...")
+            data = load_sample_stock_data('AAPL')
             return prepare_dataframe(data), False
             
-        # Try to fetch real data
-        data = fetch_stock_data(ticker, years_of_data)
-        if data is not None and not data.empty:
-            return prepare_dataframe(data), True
+        # For other tickers, use real-time data
+        st.info(f"Fetching real-time data for {ticker}...")
+        data = fetch_realtime_data(ticker, years_of_data)
+        
+        if data is None or data.empty:
+            raise ValueError(f"No data available for {ticker}")
             
-        st.warning("No data returned from API. Using sample data.")
-        data, _ = load_sample_stock_data()
-        return prepare_dataframe(data), False
+        return prepare_dataframe(data), True
             
     except Exception as e:
-        st.warning(f"Error processing data: {str(e)}. Falling back to sample data.")
-        try:
-            data, _ = load_sample_stock_data()
-            return prepare_dataframe(data), False
-        except Exception as e:
-            st.error(f"Critical error loading sample data: {str(e)}")
-            # Return empty DataFrame with required columns as last resort
-            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), False
+        st.error(f"Error loading data: {str(e)}")
+        st.warning("Falling back to AAPL sample data...")
+        data = load_sample_stock_data('AAPL')
+        return prepare_dataframe(data), False
 
 @st.cache_data(ttl=3600, show_spinner="Training the model...")
 def train_model(ticker: str, look_back: int, data: pd.DataFrame):
@@ -433,8 +546,22 @@ def train_model(ticker: str, look_back: int, data: pd.DataFrame):
 if 'train_clicked' not in st.session_state:
     st.session_state.train_clicked = False
 
-# Load data first (not cached)
-data, is_real_data = load_and_prepare_data(ticker, look_back, years_of_data, use_sample_data)
+# Load data using real-time data
+try:
+    data, is_real_data = load_and_prepare_data(
+        ticker=ticker.upper(),
+        look_back=look_back,
+        years_of_data=years_of_data,
+        use_sample_data=False  # Always use real-time data
+    )
+    
+    if data is None or data.empty:
+        st.error("Failed to load data. Please try a different ticker or use sample data.")
+        st.stop()
+        
+except Exception as e:
+    st.error(f"Error loading data: {str(e)}")
+    st.stop()
 
 if st.sidebar.button('Train Model') or st.session_state.train_clicked:
     st.session_state.train_clicked = True
