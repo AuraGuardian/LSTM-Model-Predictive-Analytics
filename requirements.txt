@@ -1,0 +1,14 @@
+numpy>=1.24.3
+pandas>=2.0.3
+tensorflow==2.15.0
+matplotlib>=3.6.0
+scikit-learn>=1.2.0
+streamlit>=1.24.0
+plotly>=5.13.0
+polygon-api-client>=1.13.3
+python-dotenv>=1.0.0
+prometheus-client>=0.20.0
+ta>=0.10.0  # For technical analysis indicators
+joblib>=1.2.0  # For model persistence
+fastapi>=0.104.0
+uvicorn>=0.24.0

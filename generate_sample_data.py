@@ -1,0 +1,33 @@
+import numpy as np
+import pandas as pd
+import os
+
+def generate_sample_data():
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Generate date range
+    dates = pd.date_range(start='2018-01-01', end='2023-12-31', freq='B')  # Business days
+    
+    # Generate synthetic stock prices (random walk)
+    n_days = len(dates)
+    returns = np.random.normal(0.0005, 0.01, n_days)  # Daily returns
+    prices = 100 * np.exp(np.cumsum(returns))  # Starting price of 100
+    
+    # Add some seasonality
+    seasonality = 5 * np.sin(np.linspace(0, 20*np.pi, n_days))
+    prices += seasonality
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'Date': dates,
+        'Close': np.round(prices, 2)
+    })
+    
+    # Save to CSV
+    df.to_csv('sample_stock_data.csv', index=False)
+    print(f"Generated {len(df)} days of sample stock data.")
+    print(df.head())
+
+if __name__ == "__main__":
+    generate_sample_data()
