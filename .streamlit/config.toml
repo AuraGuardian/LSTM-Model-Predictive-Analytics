@@ -1,0 +1,13 @@
+[server]
+headless = true
+port = 8501
+enableCORS = false
+
+[browser]
+serverAddress = "0.0.0.0"
+
+[runner]
+fastReruns = true
+
+[client]
+showErrorDetails = true

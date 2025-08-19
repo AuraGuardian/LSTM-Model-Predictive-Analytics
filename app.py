@@ -22,13 +22,37 @@ from metrics_server import start_metrics_server
 # Load environment variables
 load_dotenv()
 
-# Initialize Polygon client
-POLYGON_API_KEY = os.getenv('POLYGON_API_KEY')
-if not POLYGON_API_KEY:
-    st.error("Polygon API key not found. Please check your .env file.")
-    st.stop()
+# Initialize Polygon client with session state
+if 'polygon_client' not in st.session_state:
+    st.session_state.polygon_client = None
 
-polygon_client = RESTClient(api_key=POLYGON_API_KEY)
+# Function to initialize Polygon client
+def init_polygon_client(api_key: str):
+    try:
+        return RESTClient(api_key=api_key)
+    except Exception as e:
+        st.error(f"Error initializing Polygon client: {str(e)}")
+        return None
+
+# Sidebar for API key input
+with st.sidebar:
+    st.subheader("API Settings")
+    api_key = st.text_input(
+        "Enter your Polygon.io API Key",
+        type="password",
+        help="Get your API key from https://polygon.io/"
+    )
+    
+    if api_key:
+        if not api_key.startswith('sk_'):
+            st.warning("API key should start with 'sk_'")
+        else:
+            st.session_state.polygon_client = init_polygon_client(api_key)
+    
+    # Check if we have a valid client
+    if st.session_state.polygon_client is None and not os.getenv('POLYGON_API_KEY'):
+        st.warning("Please enter a valid Polygon.io API key to use real-time data.")
+        st.info("Using sample data for demonstration.")
 
 # Start metrics server in a separate thread
 def start_monitoring():
@@ -140,8 +164,11 @@ def fetch_stock_data(ticker: str, years: int = 5) -> Optional[pd.DataFrame]:
     Returns:
         DataFrame with stock data or None if there was an error
     """
-    # Check if Polygon API key is available
-    if 'POLYGON_API_KEY' not in os.environ or not os.environ['POLYGON_API_KEY']:
+    # Use environment variable or session state client
+    if st.session_state.polygon_client is None and 'POLYGON_API_KEY' in os.environ:
+        st.session_state.polygon_client = init_polygon_client(os.environ['POLYGON_API_KEY'])
+    
+    if st.session_state.polygon_client is None:
         st.warning("Polygon.io API key not found. Using sample data instead.")
         return None
         
@@ -156,28 +183,28 @@ def fetch_stock_data(ticker: str, years: int = 5) -> Optional[pd.DataFrame]:
         all_aggs = []
         current_date = start_date
         
-        while current_date < end_date:
-            # Get one year of data at a time to avoid timeouts
-            batch_end = min(current_date + timedelta(days=365), end_date)
-            
-            try:
-                batch_aggs = list(polygon_client.list_aggs(
-                    ticker=ticker.upper(),
+        try:
+            while current_date < end_date:
+                next_date = min(current_date + timedelta(days=365), end_date)
+                
+                # Get aggregated bars (candles) data
+                aggs = list(st.session_state.polygon_client.get_aggs(
+                    ticker=ticker,
                     multiplier=1,
-                    timespan="day",
+                    timespan='day',
                     from_=current_date.strftime('%Y-%m-%d'),
-                    to=batch_end.strftime('%Y-%m-%d'),
-                    limit=50000,
-                    sort='asc'
+                    to=next_date.strftime('%Y-%m-%d'),
+                    limit=50000
                 ))
                 
-                if batch_aggs:
-                    all_aggs.extend(batch_aggs)
+                if aggs:
+                    all_aggs.extend(aggs)
                 
-            except Exception as e:
-                st.warning(f"Error fetching data for {ticker} from {current_date} to {batch_end}: {str(e)}")
+                current_date = next_date + timedelta(days=1)
                 
-            current_date = batch_end + timedelta(days=1)
+        except Exception as e:
+            st.warning(f"Error fetching data for {ticker} from {current_date}: {str(e)}")
+            return None
         
         if not all_aggs:
             monitor.record_api_call('polygon', 'no_data')
@@ -274,58 +301,58 @@ def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 5, u
     Returns:
         Tuple of (data, is_real_data) where data is a DataFrame and is_real_data is a boolean
     """
-    try:
-        if use_sample_data:
-            st.info("Using sample data for demonstration")
-            data, _ = load_sample_stock_data()
-            is_real_data = False
-        else:
-            # Calculate how many years of data we need
-            # We want at least 2x lookback periods for train/test split
-            min_days_needed = look_back * 2
-            years_needed = max(1, int(np.ceil(min_days_needed / 252)) + 1)  # Add buffer
-            years_needed = min(years_needed, 10)  # Cap at 10 years
-            
-            st.info(f"Fetching up to {years_needed} years of data for {ticker}...")
-            data = fetch_stock_data(ticker, years=years_needed)
-            
-            if data is None:
-                st.warning(f"Could not fetch data for {ticker}. Using sample data instead.")
-                data, _ = load_sample_stock_data()
-                is_real_data = False
-            else:
-                is_real_data = True
+    # Use sample data if requested or if no API client is available
+    if use_sample_data or st.session_state.polygon_client is None:
+        st.info("Using sample data for demonstration.")
+        data = load_sample_stock_data()
         
-        # Ensure we have enough data after loading
-        if len(data) < look_back * 2:
-            st.warning(f"Insufficient data points. Need at least {look_back * 2}, but only have {len(data)}.")
-            st.info("Using sample data instead.")
-            data, _ = load_sample_stock_data()
-            is_real_data = False
-        
-        # Ensure we have all required columns
-        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        missing_cols = [col for col in required_columns if col not in data.columns]
-        if missing_cols:
-            st.warning(f"Missing required columns in data: {missing_cols}")
-            st.info("Using sample data instead.")
-            data, _ = load_sample_stock_data()
-            is_real_data = False
-            
-        # Ensure data is properly sorted
+        # Ensure data is properly sorted and contains only business days
         if not data.index.is_monotonic_increasing:
             data = data.sort_index()
-            
-        # Ensure we have business days only
         data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
         
-        return data, is_real_data
-        
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.info("Falling back to sample data.")
-        data, _ = load_sample_stock_data()
         return data, False
+    
+    try:
+        # Try to fetch real data
+        data = fetch_stock_data(ticker, years=years_of_data)
+        if data is not None and not data.empty:
+            st.success(f"Successfully fetched {len(data)} days of data for {ticker}")
+            
+            # Ensure we have enough data after loading
+            if len(data) < look_back * 2:
+                st.warning(f"Insufficient data points. Need at least {look_back * 2}, but only have {len(data)}.")
+                st.info("Using sample data instead.")
+                return load_sample_stock_data(), False
+                
+            # Ensure we have all required columns
+            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            missing_cols = [col for col in required_columns if col not in data.columns]
+            
+            if missing_cols:
+                st.warning(f"Missing required columns: {', '.join(missing_cols)}. Using sample data.")
+                return load_sample_stock_data(), False
+                
+            # Ensure we have business days only and data is properly sorted
+            data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
+            if not data.index.is_monotonic_increasing:
+                data = data.sort_index()
+                
+            return data, True
+            
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        
+    # Fall back to sample data if anything goes wrong
+    st.warning("Could not fetch real-time data. Falling back to sample data.")
+    data = load_sample_stock_data()
+    
+    # Ensure data is properly sorted and contains only business days
+    if not data.index.is_monotonic_increasing:
+        data = data.sort_index()
+    data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
+    
+    return data, False
 
 @st.cache_data(ttl=3600, show_spinner="Training the model...")
 def train_model(ticker: str, look_back: int, data: pd.DataFrame):
