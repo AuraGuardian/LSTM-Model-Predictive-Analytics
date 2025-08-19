@@ -1,13 +1,17 @@
 [server]
 headless = true
-port = 8501
-enableCORS = false
+port = 8506 # Changed from 8501 to avoid port conflict
+enableCORS = true  # Must be true when XSRF protection is enabled
+enableXsrfProtection = false  # Disable XSRF protection to avoid CORS conflicts
 
 [browser]
 serverAddress = "0.0.0.0"
 
 [runner]
 fastReruns = true
+
+[logger]
+level = "info"
 
 [client]
 showErrorDetails = true

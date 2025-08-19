@@ -1,16 +1,29 @@
 import os
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, Callback
+import plotly.graph_objects as go
+import streamlit as st
+import joblib
 import tensorflow as tf
 from datetime import datetime, timedelta
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, List, Dict, Any
+
+# Try to import yfinance with a fallback
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    if 'streamlit' in globals():
+        st.warning("yfinance is not installed. Some features may be limited.")
+    else:
+        print("Warning: yfinance is not installed. Some features may be limited.")
 
 # Import monitoring
 from monitoring import monitor
@@ -37,7 +50,19 @@ class StockPredictor:
         self.target_column = 'Close'
 
     def fetch_data(self) -> Optional[pd.DataFrame]:
-        """Fetch stock data using yfinance with multiple features"""
+        """
+        Fetch stock data using yfinance with multiple features
+        
+        Returns:
+            DataFrame with stock data or None if data couldn't be fetched
+        """
+        if not YFINANCE_AVAILABLE:
+            if 'streamlit' in globals():
+                st.warning("yfinance is not available. Cannot fetch live data.")
+            else:
+                print("Warning: yfinance is not available. Cannot fetch live data.")
+            return None
+            
         try:
             df = yf.download(
                 self.ticker,

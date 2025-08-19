@@ -10,10 +10,30 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-from stock_prediction import StockPredictor, load_sample_data
 from typing import Tuple, Optional, Dict, Any
-from polygon import RESTClient
 from dotenv import load_dotenv
+
+# Try to import yfinance with a fallback
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    st.warning("yfinance is not installed. Some features may be limited.")
+
+# Import local modules
+try:
+    from stock_prediction import StockPredictor, load_sample_data
+except ImportError as e:
+    st.error(f"Error importing local modules: {e}")
+    raise
+
+# Import Polygon client with error handling
+try:
+    from polygon import RESTClient
+except ImportError:
+    RESTClient = None
+    st.warning("Polygon API client not available. Some features may be limited.")
 
 # Import monitoring
 from monitoring import monitor
@@ -34,25 +54,14 @@ def init_polygon_client(api_key: str):
         st.error(f"Error initializing Polygon client: {str(e)}")
         return None
 
-# Sidebar for API key input
+# Sidebar for data source selection
 with st.sidebar:
-    st.subheader("API Settings")
-    api_key = st.text_input(
-        "Enter your Polygon.io API Key",
-        type="password",
-        help="Get your API key from https://polygon.io/"
-    )
+    st.subheader("Data Source")
+    st.info("Using sample data for demonstration.")
     
-    if api_key:
-        if not api_key.startswith('sk_'):
-            st.warning("API key should start with 'sk_'")
-        else:
-            st.session_state.polygon_client = init_polygon_client(api_key)
-    
-    # Check if we have a valid client
-    if st.session_state.polygon_client is None and not os.getenv('POLYGON_API_KEY'):
-        st.warning("Please enter a valid Polygon.io API key to use real-time data.")
-        st.info("Using sample data for demonstration.")
+    # Hidden API key input for future use
+    if 'polygon_client' in st.session_state:
+        del st.session_state.polygon_client
 
 # Start metrics server in a separate thread
 def start_monitoring():
@@ -260,33 +269,63 @@ def fetch_stock_data(ticker: str, years: int = 5) -> Optional[pd.DataFrame]:
         return None
 
 def load_sample_stock_data() -> Tuple[pd.DataFrame, bool]:
-    """Generate sample stock data for demonstration"""
-    # Generate sample data
-    np.random.seed(42)
-    n_points = 1000
-    dates = pd.date_range(end=datetime(2025, 8, 4), periods=n_points)
-    base = np.linspace(100, 200, n_points)
-    noise = np.random.normal(0, 5, n_points)
-    
-    # Create realistic stock-like data
-    close_prices = base + noise
-    open_prices = close_prices * (1 + np.random.normal(0, 0.005, n_points))
-    high_prices = close_prices * (1 + np.random.uniform(0, 0.01, n_points))
-    low_prices = close_prices * (1 - np.random.uniform(0, 0.01, n_points))
-    
-    # Ensure high > open,close > low
-    high_prices = np.maximum(high_prices, open_prices, close_prices)
-    low_prices = np.minimum(low_prices, open_prices, close_prices)
-    
-    df = pd.DataFrame({
-        'Open': open_prices,
-        'High': high_prices,
-        'Low': low_prices,
-        'Close': close_prices,
-        'Volume': np.random.randint(100000, 1000000, size=n_points)
-    }, index=dates)
-    
-    return df, False
+    """Load sample stock data from Excel file"""
+    try:
+        # Try to load from the Excel file
+        excel_file = "sample_aapl_data.xlsx"
+        if os.path.exists(excel_file):
+            df = pd.read_excel(excel_file, index_col=0)
+            
+            # Ensure we have all required columns
+            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if all(col in df.columns for col in required_columns):
+                # Ensure index is datetime and sorted
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+                st.info(f"Successfully loaded sample data from {excel_file}")
+                return df, False
+        
+        # Fallback to generating sample data if file not found or invalid
+        st.warning("Sample data file not found or invalid. Generating sample data...")
+        
+        # Generate sample data as fallback
+        np.random.seed(42)
+        n_points = 1000
+        dates = pd.date_range(end=datetime.now(), periods=n_points, freq='B')
+        base = np.linspace(100, 200, n_points)
+        noise = np.random.normal(0, 5, n_points)
+        
+        # Create realistic stock-like data
+        close_prices = base + noise
+        open_prices = close_prices * (1 + np.random.normal(0, 0.005, n_points))
+        high_prices = close_prices * (1 + np.random.uniform(0, 0.01, n_points))
+        low_prices = close_prices * (1 - np.random.uniform(0, 0.01, n_points))
+        
+        # Ensure high > open,close > low
+        high_prices = np.maximum(high_prices, open_prices, close_prices)
+        low_prices = np.minimum(low_prices, open_prices, close_prices)
+        
+        # Create DataFrame
+        df = pd.DataFrame({
+            'Open': open_prices,
+            'High': high_prices,
+            'Low': low_prices,
+            'Close': close_prices,
+            'Volume': np.random.randint(100000, 1000000, size=n_points)
+        }, index=dates)
+        
+        # Ensure index is datetime and sorted
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        
+        return df, False
+        
+    except Exception as e:
+        st.error(f"Error loading sample data: {str(e)}")
+        # Return empty DataFrame with proper columns if something goes wrong
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), False
 
 def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 5, use_sample_data: bool = False) -> Tuple[pd.DataFrame, bool]:
     """
@@ -301,58 +340,50 @@ def load_and_prepare_data(ticker: str, look_back: int, years_of_data: int = 5, u
     Returns:
         Tuple of (data, is_real_data) where data is a DataFrame and is_real_data is a boolean
     """
-    # Use sample data if requested or if no API client is available
-    if use_sample_data or st.session_state.polygon_client is None:
-        st.info("Using sample data for demonstration.")
-        data = load_sample_stock_data()
-        
-        # Ensure data is properly sorted and contains only business days
-        if not data.index.is_monotonic_increasing:
-            data = data.sort_index()
-        data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
-        
-        return data, False
-    
+    def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        """Helper function to prepare and validate a DataFrame"""
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError("Invalid or empty DataFrame provided")
+            
+        # Ensure we have all required columns
+        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {', '.join(missing_cols)}")
+            
+        # Ensure index is a DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+            
+        # Sort by index and filter business days
+        df = df.sort_index()
+        return df[df.index.dayofweek < 5]  # 0=Monday, 4=Friday
+
     try:
+        # Use sample data if requested or if no API client is available
+        if use_sample_data or st.session_state.polygon_client is None:
+            st.info("Using sample data.")
+            data, _ = load_sample_stock_data()
+            return prepare_dataframe(data), False
+            
         # Try to fetch real data
-        data = fetch_stock_data(ticker, years=years_of_data)
+        data = fetch_stock_data(ticker, years_of_data)
         if data is not None and not data.empty:
-            st.success(f"Successfully fetched {len(data)} days of data for {ticker}")
+            return prepare_dataframe(data), True
             
-            # Ensure we have enough data after loading
-            if len(data) < look_back * 2:
-                st.warning(f"Insufficient data points. Need at least {look_back * 2}, but only have {len(data)}.")
-                st.info("Using sample data instead.")
-                return load_sample_stock_data(), False
-                
-            # Ensure we have all required columns
-            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            missing_cols = [col for col in required_columns if col not in data.columns]
-            
-            if missing_cols:
-                st.warning(f"Missing required columns: {', '.join(missing_cols)}. Using sample data.")
-                return load_sample_stock_data(), False
-                
-            # Ensure we have business days only and data is properly sorted
-            data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
-            if not data.index.is_monotonic_increasing:
-                data = data.sort_index()
-                
-            return data, True
+        st.warning("No data returned from API. Using sample data.")
+        data, _ = load_sample_stock_data()
+        return prepare_dataframe(data), False
             
     except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        
-    # Fall back to sample data if anything goes wrong
-    st.warning("Could not fetch real-time data. Falling back to sample data.")
-    data = load_sample_stock_data()
-    
-    # Ensure data is properly sorted and contains only business days
-    if not data.index.is_monotonic_increasing:
-        data = data.sort_index()
-    data = data[data.index.dayofweek < 5]  # 0=Monday, 4=Friday
-    
-    return data, False
+        st.warning(f"Error processing data: {str(e)}. Falling back to sample data.")
+        try:
+            data, _ = load_sample_stock_data()
+            return prepare_dataframe(data), False
+        except Exception as e:
+            st.error(f"Critical error loading sample data: {str(e)}")
+            # Return empty DataFrame with required columns as last resort
+            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), False
 
 @st.cache_data(ttl=3600, show_spinner="Training the model...")
 def train_model(ticker: str, look_back: int, data: pd.DataFrame):
@@ -416,17 +447,19 @@ if st.sidebar.button('Train Model') or st.session_state.train_clicked:
         # Get actual prices for the test period with the same length as predictions
         actual_prices = predictor.test_data.reshape(-1, 1)[:len(predicted_prices)]
         
-        # Generate dates for the test period only
+        # Generate dates for the test period up to today
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=len(actual_prices) - 1)
         test_dates = pd.date_range(
-            end=datetime(2025, 8, 4),
+            start=start_date,
+            end=end_date,
             periods=len(actual_prices)
         )
         
-        # Generate future dates for prediction
-        last_date = test_dates[-1]
+        # Generate future dates for prediction starting from tomorrow
         future_days = 60
         future_dates = pd.date_range(
-            start=last_date + pd.Timedelta(days=1),
+            start=end_date + timedelta(days=1),
             periods=future_days
         )
         

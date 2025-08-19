@@ -1,14 +1,15 @@
-numpy>=1.24.3,<2.0.0
-pandas>=2.0.3,<3.0.0
-tensorflow-cpu>=2.16.0,<3.0.0
-matplotlib>=3.6.0,<4.0.0
-scikit-learn>=1.2.0,<2.0.0
-streamlit>=1.24.0,<2.0.0
-plotly>=5.13.0,<6.0.0
-polygon-api-client>=1.13.3,<2.0.0
-python-dotenv>=1.0.0,<2.0.0
-prometheus-client>=0.20.0,<1.0.0
-ta>=0.10.0,<1.0.0  # For technical analysis indicators
-joblib>=1.2.0,<2.0.0  # For model persistence
-fastapi>=0.104.0,<1.0.0
-uvicorn>=0.24.0,<1.0.0
+numpy==1.24.3
+pandas==2.0.3
+tensorflow-cpu==2.15.0
+matplotlib==3.7.1
+scikit-learn==1.2.2
+streamlit==1.24.0
+plotly==5.13.0
+polygon-api-client==1.13.3
+python-dotenv==1.0.0
+prometheus-client==0.20.0
+ta==0.10.2
+joblib==1.2.0
+fastapi==0.104.0
+uvicorn==0.24.0
+yfinance==0.2.28
