@@ -789,3 +789,23 @@ The model is trained on historical price data and can make predictions for futur
 **Note:** This is a demonstration using sample data. For real-world applications, consider using
 more sophisticated models and additional features.
 """)
+
+if __name__ == "__main__":
+    # This block is required for Streamlit Cloud deployment
+    import streamlit.web.cli as st_cli
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--deploy":
+        # This is a deployment-specific entry point
+        st_cli._main_run_clExplicit(
+            "app.py",
+            "streamlit run",
+            [],
+            flag_options={
+                "server.port": 8501,
+                "server.headless": True,
+                "server.enableCORS": True,
+                "server.enableXsrfProtection": False,
+                "browser.serverAddress": "0.0.0.0"
+            }
+        )
