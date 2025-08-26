@@ -18,10 +18,21 @@ def generate_sample_data():
     seasonality = 5 * np.sin(np.linspace(0, 20*np.pi, n_days))
     prices += seasonality
     
-    # Create DataFrame
+    # Generate OHLCV data
+    close_prices = np.round(prices, 2)
+    open_prices = close_prices * (1 + np.random.normal(0, 0.005, n_days))
+    high_prices = np.maximum(open_prices, close_prices) * (1 + np.abs(np.random.normal(0, 0.01, n_days)))
+    low_prices = np.minimum(open_prices, close_prices) * (1 - np.abs(np.random.normal(0, 0.01, n_days)))
+    volumes = np.random.lognormal(10, 1, n_days).astype(int)
+    
+    # Create DataFrame with all required columns
     df = pd.DataFrame({
         'Date': dates,
-        'Close': np.round(prices, 2)
+        'Open': np.round(open_prices, 2),
+        'High': np.round(high_prices, 2),
+        'Low': np.round(low_prices, 2),
+        'Close': close_prices,
+        'Volume': volumes
     })
     
     # Save to CSV

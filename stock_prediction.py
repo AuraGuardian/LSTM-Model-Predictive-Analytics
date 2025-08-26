@@ -329,13 +329,21 @@ class StockPredictor:
         # Get the actual prices for the test period
         actual_prices = self.test_data[:len(predicted_prices)]
         
+        # Ensure predicted_prices is 1D
+        if len(predicted_prices.shape) > 1:
+            predicted_prices = predicted_prices.flatten()
+        
+        # Ensure actual_prices is 1D
+        if len(actual_prices.shape) > 1:
+            actual_prices = actual_prices.flatten()
+        
         # Calculate metrics
         mse = mean_squared_error(actual_prices, predicted_prices)
         mae = mean_absolute_error(actual_prices, predicted_prices)
         rmse = np.sqrt(mse)
         
         # Calculate percentage errors
-        mape = np.mean(np.abs((actual_prices - predicted_prices) / actual_prices)) * 100
+        mape = np.mean(np.abs((actual_prices - predicted_prices) / (actual_prices + 1e-10))) * 100  # Add small constant to avoid division by zero
         
         print("\nModel Evaluation:")
         print(f"Mean Squared Error (MSE): {mse:.4f}")
@@ -346,23 +354,35 @@ class StockPredictor:
         # Print sample predictions vs actuals
         print("\nSample predictions vs actual:")
         for i in range(min(5, len(actual_prices))):
-            print(f"Day {i+1}: Predicted = {predicted_prices[i][0]:.2f}, Actual = {actual_prices[i][0]:.2f}")
+            # Safely access values regardless of array dimensions
+            pred = predicted_prices[i] if isinstance(predicted_prices[i], (int, float)) else predicted_prices[i][0]
+            actual = actual_prices[i] if isinstance(actual_prices[i], (int, float)) else actual_prices[i][0]
+            print(f"Day {i+1}: Predicted = {pred:.2f}, Actual = {actual:.2f}")
         
         return mse, mae, rmse
 
 def load_sample_data():
-    """Load sample data from CSV file"""
-    import os
-    if not os.path.exists('sample_stock_data.csv'):
-        print("Sample data file not found. Generating sample data...")
+    """Load sample data from Excel file"""
+    try:
+        print("Loading AAPL sample data from Excel...")
+        df = pd.read_excel('sample_aapl_data.xlsx')
+        
+        # Ensure we have all required columns
+        required_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError("Sample data is missing required columns")
+            
+        print(f"Loaded {len(df)} days of AAPL data.")
+        print(f"Date range: {df['Date'].iloc[0]} to {df['Date'].iloc[-1]}")
+        return df
+        
+    except Exception as e:
+        print(f"Error loading sample data: {e}")
+        print("Falling back to generated sample data...")
         import generate_sample_data
         generate_sample_data.generate_sample_data()
-    
-    print("Loading sample stock data...")
-    df = pd.read_csv('sample_stock_data.csv')
-    print(f"Loaded {len(df)} days of data.")
-    print(f"Date range: {df['Date'].iloc[0]} to {df['Date'].iloc[-1]}")
-    return df['Close'].values.reshape(-1, 1)
+        df = pd.read_csv('sample_stock_data.csv')
+        return df
 
 def main():
     # Configuration
@@ -379,9 +399,9 @@ def main():
     predictor.prepare_data(data, look_back=LOOK_BACK)
     
     # Build and train the model
-    predictor.build_model()
+    predictor.build_model(look_back=LOOK_BACK)
     print("Training model...")
-    history = predictor.train_model(epochs=50, batch_size=32)
+    history = predictor.train_model(epochs=50, batch_size=32, look_back=LOOK_BACK)
     
     # Make predictions
     print("Making predictions...")
@@ -396,10 +416,10 @@ def main():
     plt.title('Stock Price Prediction')
     
     # Plot original data
-    plt.plot(np.arange(len(data)), data, label='Original Price')
+    plt.plot(np.arange(len(data)), data['Close'].values, label='Original Price')
     
     # Plot test predictions
-    test_x = np.arange(len(self.train_data), len(self.train_data) + len(predicted_prices))
+    test_x = np.arange(len(predictor.train_data), len(predictor.train_data) + len(predicted_prices))
     plt.plot(test_x, predicted_prices, label='Predicted Price', color='red')
     
     plt.xlabel('Time (days)')
