@@ -293,34 +293,84 @@ class StockPredictor:
         
         return self.model, history
 
-    def predict(self, X: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Make predictions and inverse transform to original scale"""
+    def predict(self, X: np.ndarray = None, look_back: int = 60) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Make predictions using a rolling window approach, where each prediction
+        is based on previous predictions, making the forecast more realistic.
+        
+        Args:
+            X: Input data (defaults to test data if None)
+            look_back: Number of time steps used in the model
+            
+        Returns:
+            Tuple of (train_predict_plot, test_predict_plot, predicted_prices)
+        """
         if X is None:
             X = self.X_test
             
-        # Make predictions
-        predictions = self.model.predict(X)
+        # Get the scaler's min and scale for the target column
+        target_idx = self.feature_columns.index(self.target_column)
         
-        # Create a dummy array with the same shape as the original data
-        # and inverse transform the predictions
-        dummy_array = np.zeros((len(predictions), len(self.feature_columns)))
-        # Put predictions in the 'Close' column position
-        dummy_array[:, self.feature_columns.index(self.target_column)] = predictions.reshape(-1)
+        print(f"Input shape: {X.shape}")
         
-        # Inverse transform the predictions
-        predicted_prices = self.scaler.inverse_transform(dummy_array)[:, self.feature_columns.index(self.target_column)]
+        # Get the last window from training data to start predictions
+        last_window = self.X_train[-1:]
+        
+        # Initialize array to store predictions
+        predicted_sequences = []
+        
+        # Make predictions one step at a time, updating the input window each time
+        for i in range(len(X)):
+            # Predict next value
+            current_pred = self.model.predict(last_window, verbose=0)
+            
+            # Store the prediction
+            predicted_sequences.append(current_pred[0, 0])
+            
+            # Update the last window with the new prediction
+            if i < len(X) - 1:
+                # Create a new window by shifting the old one and adding the prediction
+                new_window = np.roll(last_window, -1, axis=1)
+                new_window[0, -1, target_idx] = current_pred[0, 0]
+                last_window = new_window
+        
+        # Convert predictions to numpy array
+        predictions = np.array(predicted_sequences).reshape(-1, 1)
+        
+        # Inverse transform the predictions to get actual prices
+        predicted_prices = []
+        for i in range(len(predictions)):
+            # Create a dummy array with the same shape as the input features
+            dummy_array = np.zeros((1, len(self.feature_columns)))
+            dummy_array[0, target_idx] = predictions[i, 0]
+            predicted_price = self.scaler.inverse_transform(dummy_array)[0, target_idx]
+            predicted_prices.append(predicted_price)
+            
+        predicted_prices = np.array(predicted_prices)
+        
+        # Get the training data for plotting
+        if hasattr(self.train_data, 'columns') and self.target_column in self.train_data.columns:
+            train_target = self.train_data[self.target_column].values.reshape(-1, 1)
+        elif isinstance(self.train_data, np.ndarray):
+            # If train_data is a numpy array, assume the target is the first column
+            train_target = self.train_data.reshape(-1, 1)
+        else:
+            raise ValueError(f"Unsupported train_data type: {type(self.train_data)}")
         
         # Create arrays for plotting
-        total_length = len(self.train_data) + len(predicted_prices)
+        total_length = len(train_target) + len(predicted_prices)
         train_predict_plot = np.empty((total_length, 1))
         train_predict_plot[:, :] = np.nan
+        train_predict_plot[:len(train_target), :] = train_target
         
         test_predict_plot = np.empty((total_length, 1))
         test_predict_plot[:, :] = np.nan
         
         # Fill in the test predictions
         if len(predicted_prices) > 0:
-            test_predict_plot[len(self.train_data):len(self.train_data) + len(predicted_prices)] = predicted_prices.reshape(-1, 1)
+            test_start = len(train_target)
+            test_end = test_start + len(predicted_prices)
+            test_predict_plot[test_start:test_end, :] = predicted_prices.reshape(-1, 1)
         
         return train_predict_plot, test_predict_plot, predicted_prices.reshape(-1, 1)
 
@@ -411,25 +461,67 @@ def main():
     print("\nModel Evaluation:")
     mse, mae, rmse = predictor.evaluate(predicted_prices)
     
-    # Plot the results
+    # Plot the results with better visualization
     plt.figure(figsize=(16, 8))
-    plt.title('Stock Price Prediction')
+    plt.title('Stock Price Prediction with LSTM')
     
-    # Plot original data
-    plt.plot(np.arange(len(data)), data['Close'].values, label='Original Price')
+    # Get the actual price data
+    all_data = predictor.scaler.inverse_transform(
+        np.concatenate((predictor.X_train.reshape(-1, len(predictor.feature_columns)), 
+                       predictor.X_test.reshape(-1, len(predictor.feature_columns))), axis=0)
+    )
+    close_prices = all_data[:, predictor.feature_columns.index('Close')]
     
-    # Plot test predictions
-    test_x = np.arange(len(predictor.train_data), len(predictor.train_data) + len(predicted_prices))
-    plt.plot(test_x, predicted_prices, label='Predicted Price', color='red')
+    # Define the test start point (end of training data)
+    test_start = len(predictor.X_train)
+    
+    # Plot training data
+    plt.plot(np.arange(test_start), 
+             close_prices[:test_start], 
+             label='Training Data',
+             color='blue',
+             alpha=0.7)
+    
+    # Plot test data
+    test_len = len(predictor.X_test)
+    plt.plot(np.arange(test_start, test_start + test_len),
+             close_prices[test_start:test_start + test_len],
+             label='Actual Test Data',
+             color='green',
+             alpha=0.7)
+    
+    # Plot predictions
+    pred_start = test_start
+    pred_end = pred_start + len(predicted_prices)
+    plt.plot(np.arange(pred_start, pred_end),
+             predicted_prices.flatten(),
+             label='Predicted Prices',
+             color='red',
+             linewidth=2)
+    
+    # Add vertical line to separate training and test data
+    plt.axvline(x=test_start, color='black', linestyle='--', alpha=0.7)
+    
+    # Add text annotation
+    plt.text(test_start, 
+             min(plt.ylim()[0], min(predicted_prices)), 
+             'Test Data Start',
+             rotation=90,
+             verticalalignment='bottom')
+    
+    # Add prediction metrics to the plot
+    plt.figtext(0.15, 0.85, 
+                f'Model Performance:\nMSE: {mse:.2f}\nMAE: {mae:.2f}\nRMSE: {rmse:.2f}',
+                bbox={'facecolor': 'white', 'alpha': 0.8, 'pad': 10})
     
     plt.xlabel('Time (days)')
     plt.ylabel('Stock Price')
     plt.legend()
-    plt.grid(True)
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
-    # Save the plot
-    plt.savefig('stock_prediction.png')
+    # Save the plot with higher DPI
+    plt.savefig('stock_prediction.png', dpi=300, bbox_inches='tight')
     print("\nPrediction plot saved as 'stock_prediction.png'")
     plt.show()
 
