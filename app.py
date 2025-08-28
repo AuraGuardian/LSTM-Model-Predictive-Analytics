@@ -5,6 +5,7 @@ import uvicorn
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 import streamlit as st
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
@@ -12,6 +13,10 @@ from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from typing import Tuple, Optional, Dict, Any
 from dotenv import load_dotenv
+import pmdarima as pm
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+import matplotlib.dates as mdates
 
 # Try to import yfinance with a fallback
 try:
@@ -64,6 +69,11 @@ def init_polygon_client():
         st.error(f"Error initializing Polygon client: {str(e)}")
         return None
 
+# Sidebar for navigation
+st.sidebar.title("Navigation")
+pages = ["LSTM Prediction", "SARIMA Analysis"]
+page = st.sidebar.radio("Go to", pages, index=0)
+
 # Sidebar for stock selection
 with st.sidebar:
     st.subheader("Stock Selection")
@@ -96,6 +106,320 @@ def start_monitoring():
 monitoring_thread = threading.Thread(target=start_monitoring, daemon=True)
 monitoring_thread.start()
 
+def sarima_analysis(ticker, data):
+    st.title("SARIMA Time Series Analysis")
+    st.write(f"Analyzing {ticker} stock prices using SARIMA model")
+    
+    # Prepare time series data
+    ts_data = data['Close'].dropna()
+    
+    with st.spinner('Analyzing time series data...'):
+        # Display original time series
+        st.subheader("Original Time Series")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ts_data.index, y=ts_data, name='Close Price'))
+        fig.update_layout(
+            title='Stock Price Over Time',
+            xaxis_title='Date',
+            yaxis_title='Price ($)',
+            template='plotly_white'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Decompose the time series
+        st.subheader("Time Series Decomposition")
+        
+        # Calculate a safe period based on data length
+        # Use the largest possible period that fits in the data with at least 2 full cycles
+        max_possible_period = min(252, len(ts_data) // 2)  # Max 1 year (252 trading days)
+        safe_period = min(5, max_possible_period)  # Start with 5 as minimum
+        
+        # Try to find a reasonable period that fits the data
+        for period in [252, 63, 21, 5]:  # Yearly, quarterly, monthly, weekly
+            if len(ts_data) >= 2 * period:
+                safe_period = period
+                break
+                
+        st.info(f"Using adaptive period of {safe_period} days for decomposition")
+        
+        try:
+            # Use STL for more robust decomposition with limited data
+            from statsmodels.tsa.seasonal import STL
+            
+            try:
+                # Try with the calculated period
+                stl = STL(ts_data, period=safe_period, robust=True)
+                decomposition = stl.fit()
+            except Exception as e:
+                # If that fails, try with a smaller period
+                st.warning(f"Decomposition with period {safe_period} failed, trying with smaller period...")
+                safe_period = max(5, safe_period // 2)
+                stl = STL(ts_data, period=safe_period, robust=True)
+                decomposition = stl.fit()
+            
+            # Store the period for reference
+            st.session_state.seasonal_period = safe_period
+            
+            # Plot decomposition
+            fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10))
+            
+            # Original series
+            ax1.plot(ts_data.index, ts_data)
+            ax1.set_title('Original Time Series')
+            
+            # Trend
+            ax2.plot(ts_data.index, decomposition.trend)
+            ax2.set_title('Trend')
+            
+            # Seasonal
+            ax3.plot(ts_data.index, decomposition.seasonal)
+            ax3.set_title('Seasonal')
+            
+            # Residual
+            ax4.plot(ts_data.index, decomposition.resid)
+            ax4.set_title('Residual')
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+        except Exception as e:
+            st.warning(f"Could not perform seasonal decomposition: {str(e)}")
+        
+        # ACF and PACF plots
+        st.subheader("Autocorrelation Analysis")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("Autocorrelation Function (ACF)")
+            fig, ax = plt.subplots(figsize=(10, 4))
+            plot_acf(ts_data, lags=40, ax=ax)
+            st.pyplot(fig)
+        
+        with col2:
+            st.write("Partial Autocorrelation Function (PACF)")
+            fig, ax = plt.subplots(figsize=(10, 4))
+            plot_pacf(ts_data, lags=40, ax=ax)
+            st.pyplot(fig)
+        
+        # SARIMA Model Fitting
+        st.subheader("SARIMA Model Fitting")
+        st.write("Automatically finding the best SARIMA parameters using pmdarima...")
+        
+        with st.spinner('Fitting SARIMA model (this may take a few minutes)...'):
+            try:
+                # Use auto_arima to find best SARIMA parameters
+                model = pm.auto_arima(ts_data,
+                                    start_p=0, max_p=3,
+                                    start_q=0, max_q=3,
+                                    d=1,  # Let the model determine differencing
+                                    seasonal=True,
+                                    m=5,  # Weekly seasonality (5 trading days)
+                                    start_P=0, max_P=2,
+                                    start_Q=0, max_Q=2,
+                                    D=1,  # Seasonal differencing
+                                    trace=True,
+                                    error_action='ignore',
+                                    suppress_warnings=True,
+                                    stepwise=True)
+                
+                st.success(f"Best SARIMA parameters: {model.order}x{model.seasonal_order}")
+                
+                # Plot diagnostics
+                st.subheader("Model Diagnostics")
+                fig = model.plot_diagnostics(figsize=(12, 8))
+                st.pyplot(fig)
+                
+                # Make forecasts
+                st.subheader("Forecast")
+                n_periods = st.slider("Select number of days to forecast:", 5, 30, 10)
+                
+                # Generate forecasts
+                forecast, conf_int = model.predict(n_periods=n_periods, return_conf_int=True)
+                
+                # Use the actual datetime index for plotting if available
+                if isinstance(ts_data.index, pd.DatetimeIndex):
+                    # Create forecast index based on data type
+                    last_date = ts_data.index[-1]
+                    forecast_dates = pd.date_range(
+                        start=last_date + pd.Timedelta(days=1),
+                        periods=len(forecast),
+                        freq='B'  # Business days only
+                    )
+                else:
+                    forecast_dates = range(len(ts_data), len(ts_data) + len(forecast))
+                xaxis_title = 'Date'
+                
+                fig = go.Figure()
+                
+                # Plot historical data
+                fig.add_trace(go.Scatter(
+                    x=historical_index[-100:],  # Last 100 periods
+                    y=ts_data[-100:],
+                    mode='lines',
+                    name='Historical Data'
+                ))
+                
+                # Ensure forecast_dates is the same length as forecast
+                if len(forecast_dates) > len(forecast):
+                    forecast_dates = forecast_dates[:len(forecast)]
+                elif len(forecast_dates) < len(forecast):
+                    forecast = forecast[:len(forecast_dates)]
+                
+                # Plot forecast
+                fig.add_trace(go.Scatter(
+                    x=forecast_dates,
+                    y=forecast,
+                    mode='lines+markers',
+                    name='Forecast',
+                    line=dict(color='green')
+                ))
+                
+                # Plot confidence intervals
+                fig.add_trace(go.Scatter(
+                    x=forecast_dates + forecast_dates[::-1],  # x coordinates for the polygon
+                    y=np.concatenate([conf_int[:, 0], conf_int[:, 1][::-1]]),
+                    fill='toself',
+                    fillcolor='rgba(0,100,80,0.2)',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    showlegend=True,
+                    name='95% Confidence Interval'
+                ))
+                
+                fig.update_layout(
+                    title=f'{n_periods}-Day Stock Price Forecast',
+                    xaxis_title=xaxis_title,
+                    yaxis_title='Stock Price',
+                    template='plotly_white'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Show forecast values in a table
+                forecast_df = pd.DataFrame({
+                    'Date': forecast_dates,
+                    'Forecast': forecast,
+                    'Lower Bound': conf_int[:, 0],
+                    'Upper Bound': conf_int[:, 1]
+                }).set_index('Date')
+                
+                st.dataframe(
+                    forecast_df.style.format({
+                        'Forecast': '{:.2f}',
+                        'Lower Bound': '{:.2f}',
+                        'Upper Bound': '{:.2f}'
+                    })
+                )
+                
+                # Model summary
+                st.subheader("Model Summary")
+                st.text(str(model.summary()))
+                
+                # Add testing section
+                tab1, tab2 = st.tabs(["Analysis", "Testing"])
+                
+                with tab1:
+                    st.subheader("Model Summary")
+                    st.text(str(model.summary()))
+                    
+                    # Show forecast plot in the Analysis tab
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.dataframe(
+                        forecast_df.style.format({
+                            'Forecast': '{:.2f}',
+                            'Lower Bound': '{:.2f}',
+                            'Upper Bound': '{:.2f}'
+                        })
+                    )
+                
+                with tab2:
+                    st.header("Model Testing")
+                    
+                    # Calculate in-sample predictions
+                    try:
+                        # Get in-sample predictions
+                        pred = model.predict_in_sample()
+                        
+                        # Calculate metrics
+                        mse = mean_squared_error(ts_data, pred)
+                        mae = mean_absolute_error(ts_data, pred)
+                        rmse = np.sqrt(mse)
+                        mape = np.mean(np.abs((ts_data - pred) / ts_data)) * 100
+                        
+                        # Display metrics
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("MSE", f"{mse:.2f}")
+                        with col2:
+                            st.metric("MAE", f"{mae:.2f}")
+                        with col3:
+                            st.metric("RMSE", f"{rmse:.2f}")
+                        with col4:
+                            st.metric("MAPE %", f"{mape:.2f}")
+                        
+                        # Plot actual vs predicted
+                        fig_test = go.Figure()
+                        fig_test.add_trace(go.Scatter(
+                            x=ts_data.index,
+                            y=ts_data,
+                            mode='lines',
+                            name='Actual'
+                        ))
+                        fig_test.add_trace(go.Scatter(
+                            x=ts_data.index,
+                            y=pred,
+                            mode='lines',
+                            name='Predicted'
+                        ))
+                        fig_test.update_layout(
+                            title='Actual vs Predicted Values',
+                            xaxis_title='Date',
+                            yaxis_title='Price',
+                            template='plotly_white',
+                            showlegend=True
+                        )
+                        st.plotly_chart(fig_test, use_container_width=True)
+                        
+                        # Plot residuals
+                        residuals = ts_data - pred
+                        fig_resid = go.Figure()
+                        fig_resid.add_trace(go.Scatter(
+                            x=ts_data.index,
+                            y=residuals,
+                            mode='lines+markers',
+                            name='Residuals'
+                        ))
+                        fig_resid.add_hline(
+                            y=0,
+                            line_dash='dash',
+                            line_color='red',
+                            opacity=0.5
+                        )
+                        fig_resid.update_layout(
+                            title='Residuals Plot',
+                            xaxis_title='Date',
+                            yaxis_title='Residuals',
+                            template='plotly_white',
+                            showlegend=True
+                        )
+                        st.plotly_chart(fig_resid, use_container_width=True)
+                        
+                    except Exception as e:
+                        st.error(f"Error in testing section: {str(e)}")
+                    
+            except Exception as e:
+                st.error(f"Error fitting SARIMA model: {str(e)}")
+
+# Page routing and model parameters
+look_back = 60  # Number of previous time steps to use for prediction
+years_of_data = 5  # Number of years of historical data to use
+
+# SARIMA parameters (different from LSTM's lookback/epochs)
+sarima_order = (1, 1, 1)  # (p,d,q) - ARIMA order
+seasonal_order = (1, 1, 1, 5)  # (P,D,Q,s) - seasonal order (5 for weekly seasonality)
+
+# Main app logic will handle the page routing
+
 # Custom CSS for better styling
 st.markdown("""
     <style>
@@ -106,7 +430,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title and description
-st.title("📈 Stock Price Prediction with LSTM")
+st.title("📈 Stock Price Prediction")
 st.markdown("""
 This application uses an LSTM neural network to predict stock prices. The model is trained on historical price data
 and can make predictions for future time periods. The visualization shows the actual prices versus the predicted prices.
@@ -542,21 +866,331 @@ def train_model(ticker: str, look_back: int, data: pd.DataFrame):
     
     return predictor, model, history, predicted_prices
 
+def sarima_analysis(ticker, data):
+    st.title("SARIMA Time Series Analysis")
+    st.write(f"Analyzing {ticker} stock prices using SARIMA model")
+    
+    # Prepare time series data with proper datetime index
+    ts_data = data['Close'].dropna()
+    
+    # Ensure we have a datetime index
+    if not isinstance(ts_data.index, pd.DatetimeIndex):
+        ts_data.index = pd.to_datetime(ts_data.index)
+    
+    # Display original time series
+    st.subheader("Original Time Series")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ts_data.index, y=ts_data, name='Close Price'))
+    fig.update_layout(
+        title='Stock Price Over Time',
+        xaxis_title='Date',
+        yaxis_title='Price ($)',
+        template='plotly_white'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Decompose the time series
+    st.subheader("Time Series Decomposition")
+    
+    # Calculate a safe period based on data length
+    min_period = 5  # Minimum period for decomposition
+    max_period = min(252, len(ts_data) // 2)  # Maximum 1 year (252 trading days)
+    
+    # Find the best period that fits the data
+    best_period = min_period
+    for period in [252, 63, 21, 5]:  # Yearly, quarterly, monthly, weekly
+        if len(ts_data) >= 2 * period:
+            best_period = period
+            break
+    
+    st.info(f"Using adaptive period of {best_period} days for decomposition")
+    
+    try:
+        # Try decomposition with the best period
+        decomposition = seasonal_decompose(ts_data, period=best_period)
+        
+        # Plot decomposition
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10))
+        
+        # Original series
+        ax1.plot(ts_data.index, ts_data)
+        ax1.set_title('Original Time Series')
+        
+        # Trend
+        ax2.plot(ts_data.index, decomposition.trend)
+        ax2.set_title('Trend')
+        
+        # Seasonal
+        ax3.plot(ts_data.index, decomposition.seasonal)
+        ax3.set_title('Seasonal')
+        
+        # Residual
+        ax4.plot(ts_data.index, decomposition.resid)
+        ax4.set_title('Residual')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+    except Exception as e:
+        st.warning(f"Could not perform seasonal decomposition: {str(e)}")
+    
+    # ACF and PACF plots
+    st.subheader("Autocorrelation Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("Autocorrelation Function (ACF)")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        plot_acf(ts_data, lags=40, ax=ax)
+        st.pyplot(fig)
+    
+    with col2:
+        st.write("Partial Autocorrelation Function (PACF)")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        plot_pacf(ts_data, lags=40, ax=ax)
+        st.pyplot(fig)
+    
+    # SARIMA Model Fitting
+    st.subheader("SARIMA Model Fitting")
+    st.write("Automatically finding the best SARIMA parameters using pmdarima...")
+    
+    with st.spinner('Fitting SARIMA model (this may take a few minutes)...'):
+        try:
+            # Use auto_arima to find best SARIMA parameters
+            model = pm.auto_arima(ts_data,
+                                start_p=0, max_p=3,
+                                start_q=0, max_q=3,
+                                d=None,  # Let the model determine differencing
+                                seasonal=True,
+                                m=5,  # Weekly seasonality (5 trading days)
+                                start_P=0, max_P=2,
+                                start_Q=0, max_Q=2,
+                                D=None,  # Let the model determine seasonal differencing
+                                trace=True,
+                                error_action='warn',  # Show warnings
+                                suppress_warnings=False,
+                                stepwise=True,
+                                n_jobs=-1)  # Use all available cores
+            
+            st.success(f"Best SARIMA parameters: {model.order}x{model.seasonal_order}")
+            
+            # Plot diagnostics
+            st.subheader("Model Diagnostics")
+            fig = model.plot_diagnostics(figsize=(12, 8))
+            st.pyplot(fig)
+            
+            # Make forecasts
+            st.subheader("Forecast")
+            n_periods = st.slider("Select number of days to forecast:", 5, 30, 10)
+            
+            # Generate forecasts
+            forecast, conf_int = model.predict(n_periods=n_periods, return_conf_int=True)
+            
+            # Create a consistent x-axis for both historical and forecast data
+            if isinstance(ts_data.index, pd.DatetimeIndex):
+                # If we have datetime index, use proper business days for forecast
+                last_date = ts_data.index[-1]
+                forecast_dates = pd.bdate_range(
+                    start=last_date + pd.offsets.BDay(1),  # Next business day
+                    periods=len(forecast),
+                    freq='B'  # Business days only
+                )
+                
+                # Combine historical and forecast dates for x-axis
+                all_dates = ts_data.index.union(forecast_dates)
+                xaxis_title = 'Date'
+                
+                # Create a numeric index for plotting to avoid datetime issues
+                x_axis = range(len(ts_data) + len(forecast))
+                
+                # Create a mapping from date to x-value
+                date_to_x = {date: i for i, date in enumerate(all_dates)}
+                
+                # Get x-values for historical data
+                hist_x = [date_to_x[date] for date in ts_data.index[-100:]]
+                
+                # Get x-values for forecast
+                forecast_x = [date_to_x[date] for date in forecast_dates]
+                
+                # Create custom tick labels
+                tick_vals = list(range(0, len(all_dates), max(1, len(all_dates)//10)))
+                tick_text = [all_dates[i].strftime('%Y-%m-%d') for i in tick_vals]
+                
+            else:
+                # Fallback to simple numeric index if no datetime index
+                forecast_x = list(range(len(ts_data), len(ts_data) + len(forecast)))
+                hist_x = list(range(len(ts_data) - 100, len(ts_data)))
+                xaxis_title = 'Time Period (Relative)'
+                tick_vals = None
+                tick_text = None
+            
+            fig = go.Figure()
+            
+            # Plot historical data with proper x-values
+            fig.add_trace(go.Scatter(
+                x=hist_x,
+                y=ts_data[-100:].values,
+                mode='lines',
+                name='Historical Data'
+            ))
+            
+            # Plot forecast
+            fig.add_trace(go.Scatter(
+                x=forecast_x,
+                y=forecast,
+                mode='lines+markers',
+                name='Forecast',
+                line=dict(color='green')
+            ))
+            
+            # Plot confidence intervals
+            fig.add_trace(go.Scatter(
+                x=forecast_x + forecast_x[::-1],  # x coordinates for the polygon
+                y=np.concatenate([conf_int[:, 0], conf_int[:, 1][::-1]]),
+                fill='toself',
+                fillcolor='rgba(0,100,80,0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                showlegend=True,
+                name='95% Confidence Interval'
+            ))
+            
+            # Configure x-axis
+            if tick_vals is not None:
+                fig.update_xaxes(
+                    tickmode='array',
+                    tickvals=tick_vals,
+                    ticktext=tick_text,
+                    tickangle=45
+                )
+            
+            fig.update_layout(
+                title=f'{n_periods}-Period Stock Price Forecast',
+                xaxis_title=xaxis_title,
+                yaxis_title='Stock Price',
+                template='plotly_white'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show forecast values in a table with proper dates if available
+            if isinstance(ts_data.index, pd.DatetimeIndex):
+                forecast_df = pd.DataFrame({
+                    'Date': forecast_dates,
+                    'Forecast': forecast,
+                    'Lower Bound': conf_int[:, 0],
+                    'Upper Bound': conf_int[:, 1]
+                }).set_index('Date')
+            else:
+                forecast_df = pd.DataFrame({
+                    'Day': [f'Day {i+1}' for i in range(len(forecast))],
+                    'Forecast': forecast,
+                    'Lower Bound': conf_int[:, 0],
+                    'Upper Bound': conf_int[:, 1]
+                }).set_index('Day')
+            
+            st.dataframe(
+                forecast_df.style.format({
+                    'Forecast': '{:.2f}',
+                    'Lower Bound': '{:.2f}',
+                    'Upper Bound': '{:.2f}'
+                })
+            )
+            
+            # Model summary
+            st.subheader("Model Summary")
+            st.text(str(model.summary()))
+            
+            # Add testing section
+            st.markdown("---")
+            st.header("Model Performance")
+            
+            # Calculate in-sample predictions
+            try:
+                # Get in-sample predictions
+                pred = model.predict_in_sample()
+                
+                # Calculate metrics
+                mse = mean_squared_error(ts_data, pred)
+                mae = mean_absolute_error(ts_data, pred)
+                rmse = np.sqrt(mse)
+                mape = np.mean(np.abs((ts_data - pred) / ts_data)) * 100
+                
+                # Display metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("MSE", f"{mse:.2f}")
+                with col2:
+                    st.metric("MAE", f"{mae:.2f}")
+                with col3:
+                    st.metric("RMSE", f"{rmse:.2f}")
+                with col4:
+                    st.metric("MAPE", f"{mape:.2f}%")
+                
+                # Plot actual vs predicted
+                fig = go.Figure()
+                
+                # Use the same date handling as in the forecast section
+                if isinstance(ts_data.index, pd.DatetimeIndex):
+                    x_vals = ts_data.index
+                    x_title = 'Date'
+                else:
+                    x_vals = range(len(ts_data))
+                    x_title = 'Time Period'
+                
+                fig.add_trace(go.Scatter(
+                    x=x_vals,
+                    y=ts_data,
+                    mode='lines',
+                    name='Actual'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_vals,
+                    y=pred,
+                    mode='lines',
+                    name='Predicted'
+                ))
+                fig.update_layout(
+                    title='Actual vs Predicted Values',
+                    xaxis_title=x_title,
+                    yaxis_title='Price',
+                    template='plotly_white',
+                    xaxis=dict(
+                        tickangle=45,
+                        showgrid=True
+                    )
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+            except Exception as e:
+                st.error(f"Error in model testing: {str(e)}")
+                st.exception(e)  # Show full traceback for debugging
+            
+        except Exception as e:
+            st.error(f"Error fitting SARIMA model: {str(e)}")
+
 # Main app logic
 if 'train_clicked' not in st.session_state:
     st.session_state.train_clicked = False
 
-# Load data using real-time data
+# Load data for the selected page
 try:
-    data, is_real_data = load_and_prepare_data(
-        ticker=ticker.upper(),
-        look_back=look_back,
-        years_of_data=years_of_data,
-        use_sample_data=False  # Always use real-time data
-    )
-    
-    if data is None or data.empty:
-        st.error("Failed to load data. Please try a different ticker or use sample data.")
+    if page == "LSTM Prediction":
+        data, is_real_data = load_and_prepare_data(
+            ticker=ticker.upper(),
+            look_back=look_back,
+            years_of_data=years_of_data,
+            use_sample_data=False
+        )
+        if data is None or data.empty:
+            st.error("Failed to load data. Please try a different ticker or use sample data.")
+            st.stop()
+    elif page == "SARIMA Analysis":
+        data = fetch_realtime_data(ticker.upper())
+        if data is None or data.empty:
+            st.error("Failed to load data for SARIMA analysis. Please try a different ticker.")
+            st.stop()
+        sarima_analysis(ticker, data)
         st.stop()
         
 except Exception as e:
@@ -567,9 +1201,24 @@ if st.sidebar.button('Train Model') or st.session_state.train_clicked:
     st.session_state.train_clicked = True
     with st.spinner('Training model...'):
         # Train model with the loaded data
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Add a callback for training progress
+        class TrainingCallback(tf.keras.callbacks.Callback):
+            def on_epoch_end(self, epoch, logs=None):
+                progress = (epoch + 1) / 50  # 50 is the default number of epochs
+                progress_bar.progress(min(progress, 1.0))
+                status_text.text(f'Epoch {epoch + 1}/50 - loss: {logs["loss"]:.4f} - val_loss: {logs["val_loss"]:.4f}')
+        
+        # Train the model with progress tracking
         predictor, model, history, predicted_prices = train_model(
             ticker, look_back, data
         )
+        
+        # Clean up progress bar
+        progress_bar.empty()
+        status_text.empty()
         
         # Get actual prices for the test period with the same length as predictions
         actual_prices = predictor.test_data.reshape(-1, 1)[:len(predicted_prices)]
